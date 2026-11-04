@@ -206,23 +206,13 @@ static void loaderSetPose() {
   setPose(loader_x, y_pos, getInertialHeading());
 }
 
-// Call after clamping at the loader. The first visit remembers the heading; every later visit sets the
-// heading back to it, so heading drift from the trips to the goal is cleared each cycle
-static double loader_heading = 0;
-static void loaderHeadingReset() {
-  if (loader_visits == 1) {
-    loader_heading = getInertialHeading();
-    return;
-  }
-  setPose(x_pos, y_pos, loader_heading);
-}
-
 // Enters the loader gently instead of ramming it: drives to a few inches short, then creeps in at
 // low power for a fixed time so the robot settles against the loader the same way every cycle.
-// Raise loader_creep_volts if it doesn't reach the loader, lower it if the robot still shoves
+// Raise loader_creep_volts if it doesn't reach the loader, lower it if the robot still shoves.
+// y: the same y the robot backed up to before the turn, so it drives straight in instead of at an angle
 static const double loader_creep_volts = 3;
-static void enterLoader() {
-  moveToPoint(-63, -56, 1, 1500, true, 5.5);  // Stop about 4 inches short
+static void enterLoader(double y) {
+  moveToPoint(-63, y, 1, 1500, true, 5.5);  // Stop about 4 inches short
   driveChassis(loader_creep_volts, loader_creep_volts);
   pros::delay(500);
   stopChassis(pros::MotorBrake::hold);
@@ -235,6 +225,23 @@ static void enterLoader() {
   }
   loader_visits++;
   loaderSetPose();
+}
+
+// turnToAngle() counts a turn as done once it's within 3 degrees for 250 msec, so turns can end
+// 1-3 degrees short. This turns, then nudges the robot at low power until it's within 0.75 degrees
+// (at most 300 msec more). Same arguments as turnToAngle()
+static void turnPrecise(double angle, double time_ms, bool exit, double volts) {
+  turnToAngle(angle, time_ms, exit, volts);
+  const double start = pros::millis();
+  while (pros::millis() - start < 300) {
+    double error = std::remainder(angle - getInertialHeading(), 360.0);
+    if (std::fabs(error) < 0.75) break;
+    // Enough power to get the robot moving, a little more the further off it is
+    double power = std::copysign(std::fmin(2 + 0.5 * std::fabs(error), 4), error);
+    driveChassis(power, -power);
+    pros::delay(10);
+  }
+  stopChassis(pros::MotorBrake::hold);
 }
 
 // Drives the lift back to where it was when skills() started, using the motor encoders.
@@ -283,7 +290,7 @@ void skills() {
   moveToPoint(-48, 0, 1, 2050, true, 7);
   moveToPoint(-63.5, 0, -1, 2050, true, 4.5);
   moveToPoint(-50, 0, 1, 2050, true, 7);
-  turnToAngle(180, 800, true, 10);
+  turnPrecise(180, 800, true, 10);
   moveToPoint(-50, -20, 1, 1700, true, 7);
   lift_left.move(-127);
   lift_right.move(-127);
@@ -297,7 +304,7 @@ void skills() {
 
   // second stack 
   moveToPoint(-45, -9, -1, 2050, true, 7);
-  turnToAngle(129, 1050, true, 10);
+  turnPrecise(129, 1050, true, 10);
   pros::delay(550);
   moveToPoint(-33, -20, 1, 1950, true, 7);
   clamp.toggle();
@@ -312,7 +319,7 @@ void skills() {
   moveToPoint(-30, -23, 1, 2050, true, 6);
 
   // score second pin
-  turnToAngle(270, 1150, true, 5.6);
+  turnPrecise(270, 1150, true, 5.6);
   lift_right.brake();
   lift_right2.brake();
   lift_left.brake();
@@ -330,7 +337,7 @@ void skills() {
   clamp.toggle();
   pros::delay(400);
   moveToPoint(-31, -22, -1, 2050, true, 7);
-  turnToAngle(220, 800, true, 10);
+  turnPrecise(220, 800, true, 10);
   lift_right.move(0);
   lift_right2.move(0);
   lift_left.move(0);
@@ -347,7 +354,7 @@ void skills() {
   lift_right.brake();
   lift_right2.brake();
   lift_left.brake();
-  turnToAngle(0, 1600, true, 4.5);
+  turnPrecise(0, 1600, true, 4.5);
   moveToPoint(-53, -28, 1, 2150, true, 5);
   lift_left.move(-90);
   lift_right.move(-90);
@@ -361,36 +368,38 @@ void skills() {
   // go to match load
 
   moveToPoint(-53, -59, -1, 2050, true, 6);
-  turnToAngle(270, 1200, true, 6.2);
-  // see where it stops and check based on that. 
-  enterLoader();
-  clamp.toggle();
-  pros::delay(500);
-  loaderHeadingReset();
+  turnPrecise(270, 1200, true, 6.2);
+  // see where it stops and check based on that.
+  // Shows each distance sensor's reading and the position on the Brain screen, live, and stays here
+  // (wheels free) until you press B or end the auton. Move this line to wherever you want to check
+  showDistanceSensorsUntilB();
+  
+  // enterLoader(-59);
+  // clamp.toggle();
+  // pros::delay(500);
 
 
-  moveToPoint(-53, -56, -1, 2050, true, 5.5);
-  turnToAngle(66, 1100, true, 4.5);
-  lift_right.move(127);
-  lift_right2.move(127);
-  lift_left.move(127);
-  pros::delay(250);
-  lift_right.brake();
-  lift_right2.brake();
-  lift_left.brake();
-  moveToPoint(-34, -48, 1, 2050, true, 5.5); // go to the matchloading goal
+  // moveToPoint(-53, -56, -1, 2050, true, 5.5);
+  // turnPrecise(66, 1100, true, 4.5);
+  // lift_right.move(127);
+  // lift_right2.move(127);
+  // lift_left.move(127);
+  // pros::delay(250);
+  // lift_right.brake();
+  // lift_right2.brake();
+  // lift_left.brake();
+  // moveToPoint(-34, -48, 1, 2050, true, 5.5); // go to the matchloading goal
 
-  // score match load
-  moveToPoint(-53, -56, -1, 2050, true, 5.5);
-  turnToAngle(270, 1050, true, 5.5);
-  enterLoader();
-  clamp.toggle();
-  pros::delay(500);
-  loaderHeadingReset();
+  // // score match load
+  // moveToPoint(-53, -56, -1, 2050, true, 5.5);
+  // turnPrecise(270, 1050, true, 5.5);
+  // enterLoader(-56);
+  // clamp.toggle();
+  // pros::delay(500);
 
   // // score stack 1 
   // moveToPoint(-53, -56, -1, 2050, true, 5.5);
-  // turnToAngle(62, 1100, true, 4.5);
+  // turnPrecise(62, 1100, true, 4.5);
   // lift_right.move(127);
   // lift_right2.move(127);
   // lift_left.move(127);
@@ -404,13 +413,12 @@ void skills() {
 
   // // go to stack 2
   // moveToPoint(-53, -56, -1, 2050, true, 5.5);
-  // turnToAngle(271, 1050, true, 5.5);
-  // enterLoader();
+  // turnPrecise(271, 1050, true, 5.5);
+  // enterLoader(-56);
   // clamp.toggle();
   // pros::delay(500);
-  // loaderHeadingReset();
   // moveToPoint(-53, -56, -1, 2050, true, 5.5);
-  // turnToAngle(62, 1100, true, 4.5);
+  // turnPrecise(62, 1100, true, 4.5);
   // lift_right.move(127);
   // lift_right2.move(127);
   // lift_left.move(127);
@@ -424,13 +432,12 @@ void skills() {
 
   // // go to stack 3
   // moveToPoint(-53, -56, -1, 2050, true, 5.5);
-  // turnToAngle(271, 1050, true, 5.5);
-  // enterLoader();
+  // turnPrecise(271, 1050, true, 5.5);
+  // enterLoader(-56);
   // clamp.toggle();
   // pros::delay(500);
-  // loaderHeadingReset();
   // moveToPoint(-53, -56, -1, 2050, true, 5.5);
-  // turnToAngle(62, 1100, true, 4.5);
+  // turnPrecise(62, 1100, true, 4.5);
   // lift_right.move(127);
   // lift_right2.move(127);
   // lift_left.move(127);
@@ -444,16 +451,15 @@ void skills() {
 
   // // go to pin 
   // moveToPoint(-53, -56, -1, 2050, true, 5.5);
-  // turnToAngle(271, 1050, true, 5.5);
-  // enterLoader();
+  // turnPrecise(271, 1050, true, 5.5);
+  // enterLoader(-56);
   // clamp.toggle();
   // pros::delay(500);
-  // loaderHeadingReset();
  
   // HHEHHHEEHHEERRRRRRRRRRRRRRRRRRRRR
   
   // moveToPoint(-8, 4, -1, 2050, true, 5.5);
-  // turnToAngle(0, 1050, true, 5.5);
+  // turnPrecise(0, 1050, true, 5.5);
   // moveToPoint(-8, 10, -1, 2050, true, 5.5);
   // moveToPoint(-8, 4, 1, 2050, true, 5.5);
   // moveToPoint(-8, 10, -1, 2050, true, 5.5);
