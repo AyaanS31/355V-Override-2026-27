@@ -12,26 +12,27 @@ pros::Controller controller_1(pros::E_CONTROLLER_MASTER);
 // Override (2026-27) rule R11 caps drivetrain motors at 55W total, e.g. 4 x 11W, 5 x 11W, or 4 x 11W + 2 x 5.5W.
 // Drive encoder readings come from the FIRST motor in each group, so with mixed motors
 // list an 11W motor first and set wheel_distance_in for that motor's gearing.
-pros::MotorGroup left_chassis({-1, -2, 3}, pros::MotorGearset::blue);
-pros::MotorGroup right_chassis({4, 5, -6}, pros::MotorGearset::blue);
+pros::MotorGroup left_chassis({-15, -16, -17}, pros::MotorGearset::blue); // left drive - ports 15, 16, 17
+pros::MotorGroup right_chassis({18, 19, 20}, pros::MotorGearset::blue); // right drive - ports 18, 19, 20
 // X-drive, mecanum or H-drive: see the docs (Guide > Drive Types) for the motors to make here and
 // the line to add to runPreAutonomous() in src/rw-user.cpp
-
-pros::Imu inertial_sensor(7);
+pros::Motor lift_right(1); // lift right - ports 1, 14
+pros::Motor lift_right2(14);
+pros::Motor lift_left(-2);
+pros::adi::Pneumatics clamp('H', true); // clamp piston - 3-wire port H, starts extended
+pros::adi::Pneumatics toggle('A', true); // toggle piston - 3-wire port A, starts extended
+pros::Imu inertial_sensor(21);
 
 // Tracking wheels (a negative port reverses one). Give them any free ports if you don't use tracking wheels
-pros::Rotation horizontal_tracker(-10);
-pros::Rotation vertical_tracker(-11);
+pros::Rotation horizontal_tracker(10);  // not installed: any free port
+pros::Rotation vertical_tracker(-9);
 
 // Distance reset sensors. Give them any free ports if you don't use distance resets
-pros::Distance front_sensor(12);
-pros::Distance left_sensor(13);
-pros::Distance right_sensor(14);
-pros::Distance back_sensor(15);
+pros::Distance back_sensor(3);
+pros::Distance right_sensor(12);
+pros::Distance left_sensor(10);
+pros::Distance front_sensor(6);
 
-// Your own devices
-pros::Motor intake_motor(-18, pros::MotorGearset::green);
-pros::Distance intake_distance(20);
 
 // ============================================================================
 // USER-CONFIGURABLE PARAMETERS (CHANGE BEFORE USING THIS TEMPLATE)
@@ -39,32 +40,32 @@ pros::Distance intake_distance(20);
 
 // Distance between the middles of the left and right wheels of the drive (in inches)
 // (mecanum: plus the distance between the front and back wheels, see the docs: Guide > Drive Types)
-double distance_between_wheels = 12.3;
+double distance_between_wheels = 11.375;
 
 // motor to wheel gear ratio * wheel diameter (in inches) * pi
 // (X-drive: also * 0.707, see the docs: Guide > Drive Types)
-double wheel_distance_in = (36.0 / 48.0) * 3.17 * M_PI;
+double wheel_distance_in = (36.0 / 48.0) * 3.25 * M_PI;
 
 // PID Constants for movement
 // distance_* : Linear PID for straight driving
 // turn_*     : PID for turning in place
 // heading_correction_* : PID for heading correction during linear movement
 double distance_kp = 1.1, distance_ki = 0.1, distance_kd = 7;
-double turn_kp = 0.3, turn_ki = 0, turn_kd = 2.5;
+double turn_kp = 0.4, turn_ki = 0.04, turn_kd = 2.75;
 double heading_correction_kp = 0.6, heading_correction_ki = 0, heading_correction_kd = 4;
 
 // Enable or disable the use of tracking wheels
 bool using_horizontal_tracker = false;  // Set to true if a horizontal tracking wheel is installed and used for odometry
-bool using_vertical_tracker = false;   // Set to true if a vertical tracking wheel is installed and used for odometry
+bool using_vertical_tracker = true;   // Set to true if a vertical tracking wheel is installed and used for odometry
 
 // IGNORE THESE IF YOU ARE NOT USING TRACKING WHEELS
 // These comments are in the perspective of a top down view of the robot when the robot is facing vertical
 // Vertical distance from the center of the bot to the horizontal tracking wheel (in inches, positive is when the wheel is behind the center)
 double horizontal_tracker_dist_from_center = 2.71875;
 // Horizontal distance from the center of the bot to the vertical tracking wheel (in inches, positive is when the wheel is to the right of the center)
-double vertical_tracker_dist_from_center = -0.03125;
+double vertical_tracker_dist_from_center = 0;
 double horizontal_tracker_diameter = 1.975; // Diameter of the horizontal tracker wheel (in inches)
-double vertical_tracker_diameter = 1.975; // Diameter of the vertical tracker wheel (in inches)
+double vertical_tracker_diameter = 2; // Diameter of the vertical tracker wheel (in inches)
 
 // Distance Reset setup
 // If you are not using all four distance sensors, just set the unused ones to 0
@@ -75,17 +76,17 @@ double vertical_tracker_diameter = 1.975; // Diameter of the vertical tracker wh
 // double front_sensor_offsetY = 6.5;
 // For the X offset, a negative value indicates that the sensor is located on the left side of the robot, while a positive value indicates that it is on the right side.
 
-double front_sensor_offsetX = 0.0;
-double front_sensor_offsetY = 0.0;
+double front_sensor_offsetX = 4.25;
+double front_sensor_offsetY = 5.687;
 
-double left_sensor_offsetX = 0.0;
+double left_sensor_offsetX = -5.6875;
 double left_sensor_offsetY = 0.0;
 
-double right_sensor_offsetX = 0.0;
+double right_sensor_offsetX = 5.6875;
 double right_sensor_offsetY = 0.0;
 
-double back_sensor_offsetX = 0.0;
-double back_sensor_offsetY = 0.0;
+double back_sensor_offsetX = -4.25;
+double back_sensor_offsetY = -5.687;
 
 // ============================================================================
 // ADVANCED TUNING (OPTIONAL)
@@ -132,7 +133,7 @@ double distance_reset_max_angle = 30;
 double distance_reset_max_jump = 0;
 // Distance resets: skip readings that hit the wall this close to a corner (inches, 0 = off).
 // For Override, about 18 keeps the corner loaders out of the readings
-double distance_reset_corner_margin = 0;
+double distance_reset_corner_margin = 18;
 
 // MCL (see startMcl() in src/rw-user.cpp): particle count (more = smoother but slower, up to 1000),
 // longest distance reading it trusts (inches), and how far behind the distance sensor readings are (msec).
@@ -146,6 +147,26 @@ double distance_sensor_delay_msec = 40;
 // To measure yours: put the robot a tape-measured distance from a wall (2-4 ft), then use
 // (measured distance) / (what the sensor reads). 1.0 = no correction
 double distance_sensor_scale = 1.0;
+
+// Distance sensor auto reset (src/rw-distance.cpp): keeps x and y lined up with the walls while
+// the robot runs. Uses the sensor offsets above and the distance_reset_* checks too.
+bool auto_reset_enabled = false;       // Set to false in code to pause it (e.g. while pushing on a wall goal)
+double auto_reset_min_range = 2;       // Shortest reading it trusts (inches). Closer than ~1" the sensor can't measure
+double auto_reset_max_range = 50;      // Longest reading it trusts (inches). Readings get less exact further away
+int auto_reset_min_confidence = 40;    // Sensor confidence (0-63) needed past 200 mm. Lower if walls get skipped
+int auto_reset_samples = 5;            // Readings in a row that must agree before it corrects (each 30 msec)
+double auto_reset_max_spread = 1.0;    // How far apart those readings can be (inches)
+double auto_reset_deadband = 0.4;      // Leave errors smaller than this alone (inches), so the position doesn't jitter
+double auto_reset_max_error = 6;       // Ignore errors bigger than this (inches): probably a robot or game element
+double auto_reset_max_disagree = 1.5;  // Two sensors on the same axis (e.g. front and back) must agree within this (inches)
+double auto_reset_gain = 0.3;          // Fraction of the error fixed each update (0-1). Higher = faster, lower = smoother
+double auto_reset_max_speed = 30;      // Only correct below this speed (in/s)
+double auto_reset_max_turn_rate = 60;  // and this turn rate (deg/s): readings while spinning are least exact
+// Things against the walls (inches along the wall from the field center, the same on every wall).
+// Readings that land near one are skipped. Override: the Cup+Pin stacks at +/-23.6, 3.2" wide
+std::vector<double> auto_reset_wall_obstacles = {-23.6, 23.6};
+double auto_reset_obstacle_width = 3.2;
+double auto_reset_beam_half_angle = 12;  // The sensor's beam spreads about this much each side (degrees)
 
 // Motion profiles and path following (driveProfiled, turnProfiled, followPath, followPathRamsete).
 // These use a model of your drive: drive_kS = volts to start moving, drive_kV = volts per in/s,

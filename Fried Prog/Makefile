@@ -16,6 +16,10 @@ WARNFLAGS+=
 EXTRA_CFLAGS=
 EXTRA_CXXFLAGS=
 
+# The installed PROS toolchain (GCC 13) doesn't support common.mk's default gnu23 / gnu++26
+C_STANDARD:=gnu2x
+CXX_STANDARD:=gnu++23
+
 # Set to 1 to enable hot/cold linking
 USE_PACKAGE:=1
 
