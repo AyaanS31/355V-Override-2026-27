@@ -1,5 +1,6 @@
 #include "rw-config.h"
 #include "rw/hardware.h"
+#include <algorithm>
 #include <cmath>
 
 // IMPORTANT: Remember to add respective function declarations to include/rw-config.h
@@ -36,22 +37,7 @@ void leftSide(){
 }
 
 // leftSide mirrored to the right side of the field: every x flips sign and the turn goes the other way
-void rightSide(){
-  setPose(-my_start_x, my_start_y, my_start_heading);
-  lift_right.move(127);
-  lift_left.move(127);
-  pros::delay(330);
-  lift_right.brake();
-  lift_left.brake();
-  moveToPoint(1, -52, 1, 2000, true);
-  moveToPoint(1, -67, -1, 2000, true);
-  moveToPoint(1, -52, 1, 2000, true);
-  moveToPoint(1, -67, -1, 2000, true);
-  moveToPoint(1, -52, 1, 2000, true);
-  turnToAngle(90, 1000);
-  moveToPoint(25, -51, 1 , 2000, true);
-  clamp.toggle();
-}
+
 
 // Controller pose display (see startPoseDisplay)
 bool pose_display_on = false;
@@ -210,11 +196,16 @@ static void loaderSetPose() {
 // low power for a fixed time so the robot settles against the loader the same way every cycle.
 // Raise loader_creep_volts if it doesn't reach the loader, lower it if the robot still shoves.
 // y: the same y the robot backed up to before the turn, so it drives straight in instead of at an angle
-static const double loader_creep_volts = 3;
+static const double loader_creep_volts = 2;
 static void enterLoader(double y) {
-  moveToPoint(-63, y, 1, 1500, true, 5.5);  // Stop about 4 inches short
+  moveToPoint(-63, y, 1, 1700, true, 4.5);  // Stop about 4 inches short
   driveChassis(loader_creep_volts, loader_creep_volts);
-  pros::delay(500);
+  // Creep for up to 700 msec, but stop once the robot has stopped against the loader
+  const double creep_start = pros::millis();
+  while (pros::millis() - creep_start < 700) {
+    if (pros::millis() - creep_start > 300 && odom_speed_ips < 1) break;
+    pros::delay(10);
+  }
   stopChassis(pros::MotorBrake::hold);
   pros::delay(100);  // Let it settle before resetting and clamping
   // Log where odometry thinks it is before the x reset, for the Brain screen after the auton
@@ -244,6 +235,50 @@ static void turnPrecise(double angle, double time_ms, bool exit, double volts) {
   stopChassis(pros::MotorBrake::hold);
 }
 
+// The loader checkpoint: after backing up to (-53, -59) and turning to face the loader, the front
+// sensor sees the loader's face and the left sensor sees the side wall. These are the readings from a
+// good run at that spot, and where odometry said the robot was. Each later visit compares its readings
+// with these, so x and y are corrected without needing sensor offsets or real field coordinates
+static const double checkpoint_x = -52.63, checkpoint_front = 17.8;
+static const double checkpoint_y = -60.14, checkpoint_left = 5.2;
+
+// Takes the middle of 5 readings in inches. Returns false if any reading saw nothing
+// or they disagree by more than half an inch
+static bool steadyReading(double readings[5], double& reading_in) {
+  for (int i = 0; i < 5; i++) {
+    if (readings[i] <= 0 || readings[i] >= 9999 / 25.4) return false;
+  }
+  std::sort(readings, readings + 5);
+  reading_in = readings[2];
+  return readings[4] - readings[0] < 0.5;
+}
+
+// Call at the loader checkpoint, stopped and facing the loader. Takes about 0.25 sec: both sensors
+// are read at the same time. A reading more than 4 inches from what's expected is skipped
+// (probably seeing something else)
+static void checkpointReset() {
+  pros::delay(50);  // Let the robot settle
+  double front_readings[5], left_readings[5];
+  for (int i = 0; i < 5; i++) {
+    front_readings[i] = front_sensor.get() / 25.4;
+    left_readings[i] = left_sensor.get() / 25.4;
+    pros::delay(35);
+  }
+  double x = x_pos, y = y_pos, reading = 0;
+  // Facing the loader: a bigger front reading means further from it (larger x)
+  if (steadyReading(front_readings, reading)) {
+    double new_x = checkpoint_x + (reading - checkpoint_front);
+    if (std::fabs(new_x - x_pos) < 4) x = new_x;
+  }
+  // The left sensor faces the side wall: a bigger reading means further from it (larger y)
+  if (steadyReading(left_readings, reading)) {
+    double new_y = checkpoint_y + (reading - checkpoint_left);
+    if (std::fabs(new_y - y_pos) < 4) y = new_y;
+  }
+  printf("checkpoint reset: x %.2f -> %.2f, y %.2f -> %.2f\n", x_pos, x, y_pos, y);
+  setPose(x, y, getInertialHeading());
+}
+
 // Drives the lift back to where it was when skills() started, using the motor encoders.
 // Gives up after 1500 msec so a stuck lift can't hold up the auton or overheat the motors
 static void lowerLiftFully() {
@@ -259,6 +294,39 @@ static void lowerLiftFully() {
   lift_right.brake();
   lift_right2.brake();
   lift_left.brake();
+}
+
+// Lift moves that run in the background, so the lift moves while the robot turns or drives instead
+// of the robot sitting still. Call waitForLift() before anything that needs the lift finished
+static volatile bool lift_busy = false;
+
+// Runs the lift at a power for a set time, same as doing it in place, so it ends at the same height.
+// start_delay_ms waits a little first (e.g. until a turn has swung the robot away from the loader)
+static void liftForAsync(int power, int ms, int start_delay_ms = 0) {
+  lift_busy = true;
+  pros::Task([power, ms, start_delay_ms] {
+    pros::delay(start_delay_ms);
+    lift_right.move(power);
+    lift_right2.move(power);
+    lift_left.move(power);
+    pros::delay(ms);
+    lift_right.brake();
+    lift_right2.brake();
+    lift_left.brake();
+    lift_busy = false;
+  });
+}
+
+static void lowerLiftFullyAsync() {
+  lift_busy = true;
+  pros::Task([] {
+    lowerLiftFully();
+    lift_busy = false;
+  });
+}
+
+static void waitForLift() {
+  while (lift_busy) pros::delay(10);
 }
 
 // Drives from the left-wall toggle to the two mirrored red goals.
@@ -285,10 +353,280 @@ void skills() {
   lift_right.brake();
   lift_right2.brake();
   lift_left.brake();
-  moveToPoint(-63.3, 0, -1, 2050, true, 5);
+  // The wall stops the robot before it reaches x -63, so end each toggle push once the
+  // robot has been stopped for 250 msec instead of waiting out the whole timeout
+  stall_exit_msec = 250;
+  moveToPoint(-63.3, 0, -1, 1300, true, 5);
   pros::delay(200);
   moveToPoint(-48, 0, 1, 2050, true, 7);
-  moveToPoint(-63.5, 0, -1, 2050, true, 4.5);
+  moveToPoint(-63.5, 0, -1, 1300, true, 4.5);
+  stall_exit_msec = 0;
+  moveToPoint(-50, 0, 1, 2050, true, 7);
+  turnPrecise(180, 800, true, 7);
+  moveToPoint(-48, -19.6, 1, 1700, true, 7);
+  lift_left.move(-127);
+  lift_right.move(-127);
+  lift_right2.move(-127);
+  pros::delay(370);
+  lift_left.move(0);
+  lift_right.move(0);
+  lift_right2.move(0);
+  clamp.toggle();
+  pros::delay(300);  // Clamp opens before backing away
+
+  // second stack
+  moveToPoint(-45, -9, -1, 2050, true, 7);
+  turnPrecise(137, 1050, true, 10);
+  pros::delay(150);  // turnPrecise already waits until the angle settles
+  moveToPoint(-31.3, -21, 1, 1950, true, 7);
+  clamp.toggle();
+  pros::delay(300);  // Clamp closes before the lift pulls up
+  liftForAsync(127, 900);  // Lift goes up during the short move and the turn
+  moveToPoint(-30, -23, 1, 2050, true, 6);
+
+  // score second pin
+  turnPrecise(270, 1150, true, 5.6);
+  moveToPoint(-18, -23, -1, 2050, true, 6);
+  moveToPoint(-30, -23, 1, 2050, true, 6);
+  waitForLift();
+  lift_right.brake();
+  lift_right2.brake();
+  lift_left.brake();
+  moveToPoint(-51.3, -25.4, 1, 1950, true, 7);
+  lift_left.move(-70);
+  lift_right.move(-70);
+  lift_right2.move(-70);
+  pros::delay(950);
+  lift_right.move(0);
+  lift_right2.move(0);
+  lift_left.move(0);
+  lift_right.brake();
+  lift_right2.brake();
+  lift_left.brake();
+  clamp.toggle();
+  pros::delay(300);
+  moveToPoint(-31, -22, -1, 2050, true, 7);
+  turnPrecise(220, 800, true, 10);
+  lift_right.move(0);
+  lift_right2.move(0);
+  lift_left.move(0);
+  moveToPoint(-50.8, -44.2, 1, 2050, true, 4.5);
+  clamp.toggle();
+  pros::delay(300);  // Clamp closes on the stack
+  moveToPoint(-53, -47, 1, 2050, true, 4.5);
+
+  // score third stack
+  liftForAsync(100, 950);  // Lift goes up while the robot turns
+  turnPrecise(0, 1600, true, 6.5);
+  waitForLift();
+  moveToPoint(-55.2, -30, 1, 2150, true, 6.5);
+  lift_left.move(-90);
+  lift_right.move(-90);
+  lift_right2.move(-90);
+  pros::delay(800);
+  lift_right.brake();
+  lift_right2.brake();
+  lift_left.brake();
+  clamp.toggle();
+  pros::delay(400);  // Clamp opens before backing away
+  // // go to match load
+
+  moveToPoint(-53, -59, -1, 2050, true, 6);
+  lowerLiftFullyAsync();  // Lift goes down while the robot turns
+  turnPrecise(270, 1200, true, 6.2);
+  waitForLift();
+  // see where it stops and check based on that.
+  checkpointReset();  // Corrects x and y from the loader face and side wall before going in
+
+  enterLoader(-59);
+  clamp.toggle();
+  pros::delay(350);
+
+  moveToPoint(-53, -59, -1, 2050, true, 6.5);
+  liftForAsync(127, 950, 250);  // Lift goes up while turning, once the robot has swung away from the loader
+  turnPrecise(0, 1600, true, 6.5);
+  waitForLift();
+  moveToPoint(-55.2, -30, 1, 2150, true, 6.5);
+
+  lift_right.move(-70);
+  lift_right2.move(-70);
+  lift_left.move(-70);
+  pros::delay(400);
+  lift_right.brake();
+  lift_right2.brake();
+  lift_left.brake();
+  clamp.toggle();
+  pros::delay(400);  // Pause so the pin settles on the goal before backing out
+
+  // score onto the other goal now (1 pin and 3 stacks)
+  moveToPoint(-53, -59, -1, 2050, true, 6.5);
+  lowerLiftFullyAsync();  // Make sure the lift is all the way down to take the next stack
+  turnPrecise(270, 1050, true, 6.5);
+  waitForLift();
+  checkpointReset();
+  enterLoader(-59);
+  clamp.toggle();
+  pros::delay(350);
+
+
+  moveToPoint(-53, -59, -1, 2050, true, 6.5);
+  liftForAsync(127, 400, 250);  // Lift goes up while turning, once the robot has swung away from the loader
+  turnPrecise(67, 1100, true, 6.5);
+  waitForLift();
+  // moveToPoint(-34.9, -49.3, 1, 2050, true, 6.5); // go to the matchloading goal
+  // lift_right.move(-70);
+  // lift_right2.move(-70);
+  // lift_left.move(-70);
+  // pros::delay(550);
+  // lift_right.brake();
+  // lift_right2.brake();
+  // lift_left.brake();
+  // clamp.toggle();
+  // pros::delay(400);
+
+  // // scored a pin. 
+  // // now score first stack 
+  // moveToPoint(-53, -59, -1, 2050, true, 6.5);
+  // lowerLiftFullyAsync();  // Lift goes down while the robot turns
+  // turnPrecise(271, 1050, true, 6.5);
+  // waitForLift();
+  // checkpointReset();
+  // enterLoader(-59);
+  // clamp.toggle();
+  // pros::delay(350);  // Clamp closes on the stack
+  // moveToPoint(-53, -59, -1, 2050, true, 6.5);
+  // liftForAsync(127, 600, 250);  // Lift goes up while turning, once the robot has swung away from the loader
+  // turnPrecise(67, 1100, true, 6.5);
+  // waitForLift();
+  // moveToPoint(-34.9, -49.3, 1, 2050, true, 6.5); // go to the matchloading goal
+  // lift_right.move(-70);
+  // lift_right2.move(-70);
+  // lift_left.move(-70);
+  // pros::delay(550);
+  // lift_right.brake();
+  // lift_right2.brake();
+  // lift_left.brake();
+  // clamp.toggle();
+  // pros::delay(400);
+
+  // // scored first stack
+  // // now get second stack and score
+  // moveToPoint(-53, -59, -1, 2050, true, 6.5);
+  // lowerLiftFullyAsync();  // Lift goes down while the robot turns
+  // turnPrecise(271, 1050, true, 6.5);
+  // waitForLift();
+  // checkpointReset();
+  // enterLoader(-59);
+  // clamp.toggle();
+  // pros::delay(350);  // Clamp closes on the stack
+  // moveToPoint(-53, -59, -1, 2050, true, 6.5);
+  // liftForAsync(127, 750, 250);  // Lift goes up while turning, once the robot has swung away from the loader
+  // turnPrecise(67, 1100, true, 6.5);
+  // waitForLift();
+  // moveToPoint(-34.9, -49.3, 1, 2050, true, 6.5); // go to the matchloading goal
+  // lift_right.move(-70);
+  // lift_right2.move(-70);
+  // lift_left.move(-70);
+  // pros::delay(550);
+  // lift_right.brake();
+  // lift_right2.brake();
+  // lift_left.brake();
+  // clamp.toggle();
+  // pros::delay(400);
+
+  // // scored second stack
+  // // now get third stack and score 
+  // moveToPoint(-53, -59, -1, 2050, true, 6.5);
+  // lowerLiftFullyAsync();  // Lift goes down while the robot turns
+  // turnPrecise(271, 1050, true, 6.5);
+  // waitForLift();
+  // checkpointReset();
+  // enterLoader(-59);
+  // clamp.toggle();
+  // pros::delay(350);  // Clamp closes on the stack
+  // moveToPoint(-53, -59, -1, 2050, true, 6.5);
+  // liftForAsync(127, 800, 250);  // Lift goes up while turning, once the robot has swung away from the loader
+  // turnPrecise(67, 1100, true, 6.5);
+  // waitForLift();
+  // moveToPoint(-34.9, -49.3, 1, 2050, true, 6.5); // go to the matchloading goal
+  // lift_right.move(-70);
+  // lift_right2.move(-70);
+  // lift_left.move(-70);
+  // pros::delay(550);
+  // lift_right.brake();
+  // lift_right2.brake();
+  // lift_left.brake();
+  // clamp.toggle();
+  // pros::delay(400);
+
+
+  // // all stacks for goal done for match load. 
+  // // get a pin for center goal and move to toggle point
+  // moveToPoint(-53, -59, -1, 2050, true, 6.5);
+  // lowerLiftFullyAsync();  // Lift goes down while the robot turns
+  // turnPrecise(271, 1050, true, 6.5);
+  // waitForLift();
+  // checkpointReset();
+  // enterLoader(-59);
+  // clamp.toggle();
+  // pros::delay(350);  // Clamp closes on the stack
+  // // go to toggle point 
+
+  // moveToPoint(-9,-58.4, -1, 2050, true, 7);
+  // turnPrecise(0, 1050, true, 7);
+  // // Same as the first toggle: the wall stops the robot short of y -64.2, so end each push
+  // // once it has been stopped for 250 msec instead of waiting out the whole timeout
+  // stall_exit_msec = 250;
+  // moveToPoint(-9, -64.2, -1, 1300, true, 5.5);
+  // moveToPoint(-9, -55.3, 1, 2050, true, 5.5);
+  // moveToPoint(-9, -64.2, -1, 1300, true, 6);
+  // stall_exit_msec = 0;
+  // // Lift goes all the way up while backing off the toggle. Raise center_lift_up_ms if it
+  // // doesn't reach the top, lower it if it reaches the top early (saves time)
+  // const int center_lift_up_ms = 980;
+  // liftForAsync(127, center_lift_up_ms);
+  // moveToPoint(-9, -58.4, 1, 2050, true, 5.5);
+  // waitForLift();  // At max height before driving to the center goal
+
+  // // // go to center goal and score.
+  // moveToPoint(-10.9,-4.0, 1, 2050, true, 7.3);
+  // lowerLiftFully();  // All the way down onto the goal (stops the lift motors when done)
+  // clamp.toggle();    // Let go of the pin
+  // pros::delay(400);
+
+  // stopPoseDisplay();
+}
+
+void rightSide(){
+  startPoseDisplay();
+  const bool previous_auto_reset = auto_reset_enabled;
+  auto_reset_enabled = false;  // Off while driving; wallReset() turns it on at checkpoints
+  setPose(skills_start_x, skills_start_y, skills_start_heading);
+  loader_visits = 0;  // So the first loader visit this run sets the heading
+  // Start with the lift all the way down: this spot becomes position 0 for lowerLiftFully()
+  lift_right.tare_position();
+  lift_right2.tare_position();
+  lift_left.tare_position();
+
+// score first pin
+  clamp.toggle();
+  toggle.toggle();
+  moveToPoint(-48, 0, 1, 2050, true, 7);
+  lift_right.move(127);
+  lift_right2.move(127);
+  lift_left.move(127);
+  pros::delay(430);
+  lift_right.brake();
+  lift_right2.brake();
+  lift_left.brake();
+  // The wall stops the robot before it reaches x -63, so end each toggle push once the
+  // robot has been stopped for 250 msec instead of waiting out the whole timeout
+  stall_exit_msec = 250;
+  moveToPoint(-63.3, 0, -1, 1300, true, 5);
+  pros::delay(250);
+  moveToPoint(-48, 0, 1, 2050, true, 7);
+  moveToPoint(-63.5, 0, -1, 1300, true, 4.5);
+  stall_exit_msec = 0;
   moveToPoint(-50, 0, 1, 2050, true, 7);
   turnPrecise(180, 800, true, 10);
   moveToPoint(-50, -20, 1, 1700, true, 7);
@@ -300,15 +638,15 @@ void skills() {
   lift_right.move(0);
   lift_right2.move(0);
   clamp.toggle();
-  pros::delay(500);
+  pros::delay(300);  // Clamp opens before backing away
 
-  // second stack 
+  // second stack
   moveToPoint(-45, -9, -1, 2050, true, 7);
   turnPrecise(129, 1050, true, 10);
-  pros::delay(550);
+  pros::delay(150);  // turnPrecise already waits until the angle settles
   moveToPoint(-33, -20, 1, 1950, true, 7);
   clamp.toggle();
-  pros::delay(500);
+  pros::delay(300);  // Clamp closes before the lift pulls up
   lift_left.move(127);
   lift_right.move(127);
   lift_right2.move(127);
@@ -324,9 +662,9 @@ void skills() {
   lift_right2.brake();
   lift_left.brake();
   moveToPoint(-49, -24, 1, 1950, true, 7);
-  lift_left.move(-90);
-  lift_right.move(-90);
-  lift_right2.move(-90);
+  lift_left.move(-70);
+  lift_right.move(-70);
+  lift_right2.move(-70);
   pros::delay(950);
   lift_right.move(0);
   lift_right2.move(0);
@@ -335,7 +673,7 @@ void skills() {
   lift_right2.brake();
   lift_left.brake();
   clamp.toggle();
-  pros::delay(400);
+  pros::delay(300);
   moveToPoint(-31, -22, -1, 2050, true, 7);
   turnPrecise(220, 800, true, 10);
   lift_right.move(0);
@@ -343,7 +681,7 @@ void skills() {
   lift_left.move(0);
   moveToPoint(-49, -43, 1, 2050, true, 4.5);
   clamp.toggle();
-  pros::delay(300);
+  pros::delay(250);
   moveToPoint(-53, -47, 1, 2050, true, 4.5);
 
   // score third stack
@@ -364,108 +702,7 @@ void skills() {
   lift_right2.brake();
   lift_left.brake();
   clamp.toggle();
-  pros::delay(900);  // Back up so the beams clear the wall stack
-  // go to match load
-
-  moveToPoint(-53, -59, -1, 2050, true, 6);
-  turnPrecise(270, 1200, true, 6.2);
-  // see where it stops and check based on that.
-  // Shows each distance sensor's reading and the position on the Brain screen, live, and stays here
-  // (wheels free) until you press B or end the auton. Move this line to wherever you want to check
-  showDistanceSensorsUntilB();
-  
-  // enterLoader(-59);
-  // clamp.toggle();
-  // pros::delay(500);
-
-
-  // moveToPoint(-53, -56, -1, 2050, true, 5.5);
-  // turnPrecise(66, 1100, true, 4.5);
-  // lift_right.move(127);
-  // lift_right2.move(127);
-  // lift_left.move(127);
-  // pros::delay(250);
-  // lift_right.brake();
-  // lift_right2.brake();
-  // lift_left.brake();
-  // moveToPoint(-34, -48, 1, 2050, true, 5.5); // go to the matchloading goal
-
-  // // score match load
-  // moveToPoint(-53, -56, -1, 2050, true, 5.5);
-  // turnPrecise(270, 1050, true, 5.5);
-  // enterLoader(-56);
-  // clamp.toggle();
-  // pros::delay(500);
-
-  // // score stack 1 
-  // moveToPoint(-53, -56, -1, 2050, true, 5.5);
-  // turnPrecise(62, 1100, true, 4.5);
-  // lift_right.move(127);
-  // lift_right2.move(127);
-  // lift_left.move(127);
-  // pros::delay(250);
-  // lift_right.brake();
-  // lift_right2.brake();
-  // lift_left.brake();
-  // moveToPoint(-33, -49, 1, 2050, true, 5.5); // go to the matchloading goal
-  // clamp.toggle();
-  // pros::delay(500);
-
-  // // go to stack 2
-  // moveToPoint(-53, -56, -1, 2050, true, 5.5);
-  // turnPrecise(271, 1050, true, 5.5);
-  // enterLoader(-56);
-  // clamp.toggle();
-  // pros::delay(500);
-  // moveToPoint(-53, -56, -1, 2050, true, 5.5);
-  // turnPrecise(62, 1100, true, 4.5);
-  // lift_right.move(127);
-  // lift_right2.move(127);
-  // lift_left.move(127);
-  // pros::delay(250);
-  // lift_right.brake();
-  // lift_right2.brake();
-  // lift_left.brake();
-  // moveToPoint(-33, -49, 1, 2050, true, 5.5); // go to the matchloading goal
-  // clamp.toggle();
-  // pros::delay(500);
-
-  // // go to stack 3
-  // moveToPoint(-53, -56, -1, 2050, true, 5.5);
-  // turnPrecise(271, 1050, true, 5.5);
-  // enterLoader(-56);
-  // clamp.toggle();
-  // pros::delay(500);
-  // moveToPoint(-53, -56, -1, 2050, true, 5.5);
-  // turnPrecise(62, 1100, true, 4.5);
-  // lift_right.move(127);
-  // lift_right2.move(127);
-  // lift_left.move(127);
-  // pros::delay(250);
-  // lift_right.brake();
-  // lift_right2.brake();
-  // lift_left.brake();
-  // moveToPoint(-33, -49, 1, 2050, true, 5.5); // go to the matchloading goal
-  // clamp.toggle();
-  // pros::delay(500);
-
-  // // go to pin 
-  // moveToPoint(-53, -56, -1, 2050, true, 5.5);
-  // turnPrecise(271, 1050, true, 5.5);
-  // enterLoader(-56);
-  // clamp.toggle();
-  // pros::delay(500);
- 
-  // HHEHHHEEHHEERRRRRRRRRRRRRRRRRRRRR
-  
-  // moveToPoint(-8, 4, -1, 2050, true, 5.5);
-  // turnPrecise(0, 1050, true, 5.5);
-  // moveToPoint(-8, 10, -1, 2050, true, 5.5);
-  // moveToPoint(-8, 4, 1, 2050, true, 5.5);
-  // moveToPoint(-8, 10, -1, 2050, true, 5.5);
-
-  // go toggle (figure something out) and route from there.
-  // stopPoseDisplay();
+  pros::delay(300);  // Let the clamp open before the auton ends
 }
 /*
   // Drive forward from the left start, then reverse into the left-wall toggle.
@@ -515,7 +752,7 @@ void profiledExample() {
 
 
 // ============================================================================
-// PHASE 1 TESTS (checking the robot's measurements before tuning PID)
+// PHskSE 1 TESTS (checking the robot's measurements before tuning PID)
 // ============================================================================
 
 // Shows where RW thinks the robot is on the controller screen until you press B

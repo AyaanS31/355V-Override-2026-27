@@ -20,7 +20,7 @@ pros::Motor lift_right(1); // lift right - ports 1, 14
 pros::Motor lift_right2(14);
 pros::Motor lift_left(-2);
 pros::adi::Pneumatics clamp('H', true); // clamp piston - 3-wire port H, starts extended
-pros::adi::Pneumatics toggle('A', true); // toggle piston - 3-wire port A, starts extended
+pros::adi::Pneumatics toggle('A', false); // toggle piston - 3-wire port A, starts extended
 pros::Imu inertial_sensor(21);
 
 // Tracking wheels (a negative port reverses one). Give them any free ports if you don't use tracking wheels
